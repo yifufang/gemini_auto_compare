@@ -8,7 +8,7 @@ desktop.ini
 # python
 __pycache__/
 
-
+.env
 # Logs
 logs/
 *.log
