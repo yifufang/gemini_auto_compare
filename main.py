@@ -2,6 +2,7 @@ import eva_res as eva
 import os
 import json
 from Deepseek import Deepseek
+from GPT import GPT
 import pandas as pd
 from dotenv import load_dotenv
 import sys
@@ -25,19 +26,34 @@ def load_test_cases(file_path):
     return df.to_dict(orient='records')
 
 def main(test_mode=False, output_filename="results.json"):
-    # Load environment variables
-    api_key = os.getenv("DEEPSEEK_API_KEY")
+    # =============== Deepseek initiation======================
+    deepseek_api_key = os.getenv("DEEPSEEK_API_KEY")
 
-    if not api_key:
+    if not deepseek_api_key:
         print("Error: DEEPSEEK_API_KEY environment variable not set.")
         return
 
     try:
-        deepseek = Deepseek(api_key)
+        deepseek = Deepseek(deepseek_api_key)
     except Exception as e:
         print(f"Error initializing Deepseek: {e}")
         return
+    # ========================================================
+    
+    # =================GPT initiation===========================
+    gpt_api_key = os.getenv("OPENAI_API_KEY")
 
+    if not gpt_api_key:
+        print("Error: OPENAI_API_KEY environment variable not set.")
+        return
+
+    try:
+        gpt = GPT(gpt_api_key)
+    except Exception as e:
+        print(f"Error initializing Deepseek: {e}")
+        return
+    
+    # =============== Load Test Cases ========================
     test_cases_file = "./test_cases.csv"
     if not os.path.exists(test_cases_file):
         print(f"Error: Test cases file not found at {test_cases_file}")
@@ -84,8 +100,9 @@ def main(test_mode=False, output_filename="results.json"):
         except IOError as e:
              print(f"Error saving empty results to {output_filename}: {e}")
         return
-
-
+    # =======================================================================
+    
+    # =================Process each test case with both models==================
     for case in cases_to_process:
         prompt = case['prompt']
         expected_output = case['expected_output']
@@ -95,7 +112,7 @@ def main(test_mode=False, output_filename="results.json"):
         print(f"Prompt: {prompt[:200]}{'...' if len(prompt) > 200 else ''}") # Truncate long prompts for printing
 
 
-        # Get actual output from Deepseek model
+        # =========================Get actual output from Deepseek model=================================
         actual_output_deepseek = "Error generating response." # Default error message
         try:
             actual_output_deepseek = deepseek.generate_response(prompt)
@@ -104,15 +121,24 @@ def main(test_mode=False, output_filename="results.json"):
         except Exception as e:
             actual_output_deepseek = f"Error generating response: {e}"
             print(f"Error getting Deepseek response: {e}")
+        
+        # ============================Get actual output from GPT model=================================
+        actual_output_gpt = "Error generating response." # Default error message
+        try:
+            actual_output_gpt = gpt.generate_response(prompt)
+            # Print the received response (truncated)
+            print(f"Response received: {actual_output_gpt[:300]}{'...' if len(actual_output_gpt) > 300 else ''}") # Truncate long responses for printing
+        except Exception as e:
+            actual_output_gpt = f"Error generating response: {e}"
+            print(f"Error getting GPT response: {e}")
 
-
-        # Append results in the desired format
+        # ===========================Append results in the desired format==============================
         results.append({
             "prompt": prompt,
             "expected_output": expected_output,
-            "actual_output_deepseek": actual_output_deepseek
+            "actual_output_deepseek": actual_output_deepseek,
+            "actual_output_gpt": actual_output_gpt
         })
-
 
     # --- Save the results to a JSON file ---
     try:
@@ -128,4 +154,4 @@ def main(test_mode=False, output_filename="results.json"):
 
 if __name__ == "__main__":
     run_test_mode = '--test' in sys.argv or '-t' in sys.argv
-    main(test_mode=run_test_mode, output_filename="deepseek_test_results.json")
+    main(test_mode=run_test_mode, output_filename="test_results.json")
