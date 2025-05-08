@@ -26,14 +26,13 @@ class Deepseek:
         try:
             with httpx.Client(timeout=60) as client:
                 response = client.post(self.api_url, headers=self.headers, json=payload)
-                response.raise_for_status()  # Raise an error for bad responses
+                response.raise_for_status()  
                 data = response.json()
                 return data["choices"][0]["message"]["content"] if "choices" in data and len(data["choices"]) > 0 else "No response generated."
         except httpx.HTTPStatusError as e:
             print(f"HTTP error occurred: {e.response.status_code} - {e.response.text}")
 
 if __name__ == "__main__":
-    # Example usage
     api_key = os.getenv("DEEPSEEK_API_KEY")
     if not api_key:
         print("Please set the DEEPSEEK_API_KEY environment variable.")
