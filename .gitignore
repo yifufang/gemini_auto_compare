@@ -51,3 +51,7 @@ venv/
 results_with_eval.json
 
 results.json
+
+*.json
+
+*.html
