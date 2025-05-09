@@ -12,6 +12,9 @@ import time
 from typing import List, Dict, Any
 import io
 import base64
+import numpy as np
+import re # Added for keyword extraction
+from collections import Counter # Added for keyword extraction
 
 try:
     from ttkthemes import ThemedStyle
@@ -53,7 +56,8 @@ class APITesterGUI:
                         style.theme_use('alt')
                     except tk.TclError:
                         print("Warning: Built-in 'alt' theme not found. Falling back to default.")
-                        style.theme_use('default')
+                        style.use('default')
+                        print("Using built-in 'default' theme.")
         else:
             style = ttk.Style()
             try:
@@ -61,8 +65,9 @@ class APITesterGUI:
                 print("Using built-in 'alt' theme.")
             except tk.TclError:
                 print("Warning: Built-in 'alt' theme not found. Falling back to default.")
-                style.theme_use('default')
+                style.use('default') # Changed style.theme_use to style.use for default
                 print("Using built-in 'default' theme.")
+
 
         self.deepseek = None
         self.gpt = None
@@ -76,6 +81,9 @@ class APITesterGUI:
         self.overall_stats = {}
         self.is_running = False
         self.fig = None
+        self.overall_coverage = 0
+        self.overall_avg_complexity = 0
+        self.common_keywords = [] # Added for storing common keywords
 
         self.create_widgets()
 
@@ -152,6 +160,15 @@ class APITesterGUI:
         self.status_label = ttk.Label(status_frame, text="Idle", font=('TkDefaultFont', 10, 'bold'), anchor="center")
         self.status_label.pack(pady=5, fill="x")
 
+        # Added Test Coverage and Complexity Labels
+        metrics_frame = ttk.Frame(status_frame)
+        metrics_frame.pack(pady=5, fill="x")
+        self.coverage_label = ttk.Label(metrics_frame, text="Coverage: N/A", anchor="w")
+        self.coverage_label.pack(side="left", expand=True, padx=10)
+        self.complexity_label = ttk.Label(metrics_frame, text="Avg Complexity: N/A", anchor="e")
+        self.complexity_label.pack(side="right", expand=True, padx=10)
+
+
         loaded_cases_frame = ttk.LabelFrame(self.master, text="Loaded Test Cases", padding="10")
         loaded_cases_frame.pack(pady=5, padx=10, fill="both", expand=True)
 
@@ -227,10 +244,10 @@ class APITesterGUI:
         self.gpt_eval_text.pack(padx=5, pady=2, fill="x")
         self.gpt_eval_text.config(state=tk.DISABLED)
 
-        self.graph_frame = ttk.LabelFrame(self.master, text="Overall Results Graph", padding="10")
-        self.graph_frame.pack(pady=5, padx=10, fill="both", expand=True)
-
-        self.graph_canvas_widget = None
+        # Frame for the graph display in the GUI
+        self.graph_display_frame = ttk.LabelFrame(self.master, text="Overall Performance Graph", padding="10")
+        self.graph_display_frame.pack(pady=5, padx=10, fill="both", expand=True)
+        self.graph_canvas_widget = None # Widget to hold the matplotlib canvas
 
     def browse_file(self):
         filename = filedialog.askopenfilename(
@@ -249,21 +266,39 @@ class APITesterGUI:
             widget.destroy()
         self.case_checkboxes = []
         self.all_test_cases = []
+        self.overall_coverage = 0
+        self.overall_avg_complexity = 0
+        self.common_keywords = [] # Clear keywords on new file load
+        self.update_metrics_display() # Clear metrics display
+        self.hide_graph() # Hide graph when new file is loaded
 
         try:
             self.all_test_cases = self.load_test_cases(file_path)
             self.update_status(f"Loaded {len(self.all_test_cases)} test cases.")
 
             if self.all_test_cases:
+                # Calculate and display initial average complexity based on all loaded cases
+                complexities = [case.get('complexity', 0) for case in self.all_test_cases]
+                self.overall_avg_complexity = statistics.mean(complexities) if complexities else 0
+                self.update_metrics_display() # Update display after calculating initial average complexity
+
                 for i, case in enumerate(self.all_test_cases):
-                    prompt_snippet = case['prompt'][:250].replace('\n', ' ') + ('...' if len(case['prompt']) > 250 else '')
-                    expected_snippet = case['expected_output'][:250].replace('\n', ' ') + ('...' if len(case['expected_output']) > 250 else '')
-                    text = f"{i+1} | {prompt_snippet} | {expected_snippet}"
+                    prompt_snippet = case['prompt'][:100].replace('\n', ' ') + ('...' if len(case['prompt']) > 100 else '')
+                    expected_snippet = case['expected_output'][:100].replace('\n', ' ') + ('...' if len(case['expected_output']) > 100 else '')
+                    # Display complexity for each case
+                    text = f"Case {i+1} (Complexity: {case.get('complexity', 'N/A'):.2f}) | Prompt: {prompt_snippet} | Expected: {expected_snippet}"
 
                     var = tk.BooleanVar(value=True)
                     cb = ttk.Checkbutton(self.case_scrollable_frame_inner, text=text, variable=var)
                     cb.pack(anchor="w", padx=5, pady=1)
                     self.case_checkboxes.append((var, case))
+
+                # Call update_coverage after creating and setting initial state of checkboxes
+                self.update_coverage()
+
+                # Bind the update_coverage method to checkbox state changes
+                for var, _ in self.case_checkboxes:
+                    var.trace_add('write', lambda *args: self.update_coverage())
 
             else:
                 ttk.Label(self.case_scrollable_frame_inner, text="No test cases found in the selected file.").pack(padx=5, pady=5)
@@ -281,14 +316,93 @@ class APITesterGUI:
              self.all_test_cases = []
              self.case_checkboxes = []
 
+    def calculate_test_case_complexity(self, prompt: str, expected_output: str) -> float:
+        """
+        Calculates a simple complexity score based on the length of prompt and expected output.
+        This can be customized for more sophisticated complexity metrics.
+        """
+        return len(prompt) + len(expected_output)
+
+
+    def update_coverage(self):
+        """Updates the displayed coverage percentage based on selected checkboxes."""
+        if not self.all_test_cases:
+            self.overall_coverage = 0
+        else:
+            total_cases = len(self.all_test_cases)
+            selected_cases_count = sum(var.get() for var, _ in self.case_checkboxes)
+            self.overall_coverage = (selected_cases_count / total_cases) * 100 if total_cases > 0 else 0
+        self.update_metrics_display()
+
+    def update_metrics_display(self):
+        """Updates the GUI labels for coverage and complexity."""
+        self.master.after(0, lambda: self.coverage_label.config(text=f"Coverage: {self.overall_coverage:.2f}%"))
+        self.master.after(0, lambda: self.complexity_label.config(text=f"Avg Complexity: {self.overall_avg_complexity:.2f}"))
+
 
     def select_all_cases(self):
         for var, _ in self.case_checkboxes:
             var.set(True)
+        self.update_coverage()
 
     def deselect_all_cases(self):
         for var, _ in self.case_checkboxes:
             var.set(False)
+        self.update_coverage()
+
+    def extract_keywords(self, text_list: List[str], num_keywords: int = 10, n_gram: int = 1) -> List[tuple[str, int]]:
+        """
+        Extracts the most common keywords (words or n-grams) from a list of texts.
+        """
+        if not text_list:
+            return []
+
+        # Simple list of English stop words
+        stop_words = set([
+            "a", "an", "the", "is", "are", "and", "or", "in", "on", "at", "for", "with",
+            "about", "as", "by", "from", "into", "like", "of", "off", "out", "over",
+            "through", "to", "up", "with", "as", "by", "for", "from", "in", "into",
+            "of", "off", "on", "out", "over", "through", "to", "under", "up", "with",
+            "be", "been", "being", "have", "has", "had", "having", "do", "does",
+            "did", "doing", "i", "me", "my", "myself", "we", "our", "ours", "ourselves",
+            "you", "your", "yours", "yourself", "yourselves", "he", "him", "his",
+            "himself", "she", "her", "hers", "herself", "it", "its", "itself", "they",
+            "them", "their", "theirs", "themselves", "what", "which", "who", "whom",
+            "this", "that", "these", "those", "am", "is", "are", "was", "were", "be",
+            "been", "being", "have", "has", "had", "having", "do", "does", "did",
+            "doing", "a", "an", "the", "and", "but", "if", "or", "because", "as",
+            "until", "while", "of", "at", "by", "for", "with", "about", "against",
+            "between", "into", "through", "during", "before", "after", "above",
+            "below", "to", "from", "up", "down", "in", "out", "on", "off", "over",
+            "under", "again", "further", "then", "once", "here", "there", "when",
+            "where", "why", "how", "all", "any", "both", "each", "few", "more",
+            "most", "other", "some", "such", "no", "nor", "not", "only", "own", "same",
+            "so", "than", "too", "very", "s", "t", "can", "will", "just", "don",
+            "should", "now"
+        ])
+
+        combined_text = " ".join(text_list).lower()
+        # Remove punctuation and non-alphanumeric characters (except spaces)
+        combined_text = re.sub(r'[^a-z0-9\s]', '', combined_text)
+        words = combined_text.split()
+
+        # Remove stop words
+        filtered_words = [word for word in words if word not in stop_words]
+
+        if n_gram > 1:
+            # Create n-grams
+            ngrams = zip(*[filtered_words[i:] for i in range(n_gram)])
+            items = [" ".join(ngram) for ngram in ngrams]
+        else:
+            items = filtered_words
+
+        # Count frequencies
+        item_counts = Counter(items)
+
+        # Get the most common items
+        most_common_items = item_counts.most_common(num_keywords)
+
+        return most_common_items
 
 
     def start_testing(self):
@@ -326,8 +440,11 @@ class APITesterGUI:
         self.start_button.config(state=tk.DISABLED)
         self.download_button.config(state=tk.DISABLED)
         self.clear_results_display()
-        self.hide_graph()
+        self.hide_graph() # Hide graph before starting a new run
         self.update_status(f"Running {len(self.selected_test_cases)} selected test cases.")
+
+        # Recalculate coverage based on selected cases before starting
+        self.update_coverage()
 
         self.test_thread = threading.Thread(
             target=self.run_tests_in_thread,
@@ -339,10 +456,16 @@ class APITesterGUI:
         try:
             self.results = []
             total_cases = len(test_cases_to_run)
+            run_complexities = [] # To calculate average complexity of run cases
+            run_prompts = [] # To extract keywords from run cases
 
             for i, case in enumerate(test_cases_to_run):
                 prompt = case['prompt']
                 expected_output = case['expected_output']
+                complexity = case.get('complexity', 0) # Get complexity
+
+                run_complexities.append(complexity) # Add complexity to list for average calculation
+                run_prompts.append(prompt) # Add prompt to list for keyword extraction
 
                 try:
                     original_index = self.all_test_cases.index(case) + 1
@@ -389,6 +512,7 @@ class APITesterGUI:
                     "original_index": original_index,
                     "prompt": prompt,
                     "expected_output": expected_output,
+                    "complexity": complexity, # Include complexity in results
                     "actual_outputs_deepseek": actual_outputs_deepseek,
                     "actual_outputs_gpt": actual_outputs_gpt,
                     "individual_evaluations_deepseek": [],
@@ -451,6 +575,13 @@ class APITesterGUI:
                 self.results.append(case_results)
                 time.sleep(0.5)
 
+            # Calculate average complexity of the run cases
+            self.overall_avg_complexity = statistics.mean(run_complexities) if run_complexities else 0
+            # Extract common keywords from run prompts
+            self.common_keywords = self.extract_keywords(run_prompts, num_keywords=15, n_gram=1) # Extract top 15 single words
+            self.update_metrics_display() # Update GUI with final average complexity
+
+
             self.update_status("All selected test cases processed. Calculating overall results...")
             self.calculate_and_show_overall_results()
 
@@ -469,7 +600,12 @@ class APITesterGUI:
         df = df[['input', 'expected output']].dropna()
         df.columns = ['prompt', 'expected_output']
 
-        return df.to_dict(orient='records')
+        # Calculate complexity for each test case
+        test_cases = df.to_dict(orient='records')
+        for case in test_cases:
+            case['complexity'] = self.calculate_test_case_complexity(case['prompt'], case['expected_output'])
+
+        return test_cases
 
     def update_status(self, message: str):
         self.master.after(0, lambda: self.status_label.config(text=f"Status: {message}"))
@@ -537,6 +673,7 @@ class APITesterGUI:
         deepseek_valid_count_overall = 0
         gpt_consistency_scores = []
         deepseek_consistency_scores = []
+        run_complexities = [case.get('complexity', 0) for case in self.results]
 
         for case in self.results:
             for eval_result in case.get("individual_evaluations_gpt", []):
@@ -563,6 +700,7 @@ class APITesterGUI:
 
         avg_gpt_consistency = statistics.mean(gpt_consistency_scores) if gpt_consistency_scores else 0
         avg_deepseek_consistency = statistics.mean(deepseek_consistency_scores) if deepseek_consistency_scores else 0
+        avg_run_complexity = statistics.mean(run_complexities) if run_complexities else 0
 
         self.overall_stats = {
             "total_cases_loaded": len(self.all_test_cases),
@@ -575,13 +713,18 @@ class APITesterGUI:
             "deepseek_valid_percent_overall": deepseek_valid_percent_overall,
             "avg_gpt_consistency": avg_gpt_consistency,
             "avg_deepseek_consistency": avg_deepseek_consistency,
-            "show_consistency": num_retries > 1
+            "show_consistency": num_retries > 1,
+            "overall_coverage": self.overall_coverage,
+            "overall_avg_complexity": avg_run_complexity, # This will now be the average of RUN cases
+            "common_keywords": self.common_keywords # Include common keywords
         }
 
         overall_summary = (
             "\n--- Overall Results ---\n"
             f"Total Test Cases Loaded: {self.overall_stats.get('total_cases_loaded', 'N/A')}\n"
             f"Total Test Cases Run: {self.overall_stats.get('total_cases_run', 'N/A')}\n"
+            f"Test Coverage: {self.overall_stats.get('overall_coverage', 0):.2f}%\n"
+            f"Average Test Complexity (Run Cases): {self.overall_stats.get('overall_avg_complexity', 0):.2f}\n" # Displaying average of run cases
             f"Number of Retries per Case: {self.overall_stats.get('num_retries', 'N/A')}\n"
             f"Total Possible Evaluations: {self.overall_stats.get('total_possible_evaluations', 'N/A')}\n"
             f"GPT Accuracy: {self.overall_stats.get('gpt_valid_count_overall', 'N/A')}/{self.overall_stats.get('total_possible_evaluations', 'N/A')} ({self.overall_stats.get('gpt_valid_percent_overall', 0):.2f}% Valid)\n"
@@ -595,76 +738,93 @@ class APITesterGUI:
         else:
             overall_summary += "\nConsistency evaluation skipped (retries = 1).\n"
 
+        overall_summary += "\nCommon Keywords (from run prompts):\n"
+        if self.common_keywords:
+            for keyword, count in self.common_keywords:
+                overall_summary += f"- {keyword} ({count})\n"
+        else:
+            overall_summary += "No keywords found.\n"
+
+
         self.update_status("Overall results calculated.")
         print(overall_summary)
 
-        self.show_results_graph(
-            self.overall_stats['gpt_valid_percent_overall'],
-            self.overall_stats['deepseek_valid_percent_overall'],
-            self.overall_stats['avg_gpt_consistency'],
-            self.overall_stats['avg_deepseek_consistency'],
-            self.overall_stats['show_consistency']
+        # Show the graph in the GUI
+        self.show_results_graph_in_gui(
+            self.overall_stats.get('gpt_valid_percent_overall', 0),
+            self.overall_stats.get('deepseek_valid_percent_overall', 0),
+            self.overall_stats.get('avg_gpt_consistency', 0),
+            self.overall_stats.get('avg_deepseek_consistency', 0),
+            self.overall_stats.get('show_consistency', False)
         )
 
         self.master.after(0, lambda: self.download_button.config(state=tk.NORMAL))
 
-    def show_results_graph(self, gpt_accuracy, deepseek_accuracy, gpt_consistency, deepseek_consistency, show_consistency):
-        def create_graph():
-            if self.graph_canvas_widget:
-                self.graph_canvas_widget.destroy()
-                self.graph_canvas_widget = None
-                plt.close(self.fig)
-                self.fig = None
-
-            self.fig, ax1 = plt.subplots(figsize=(8, 4))
-
-            models = ['GPT', 'Deepseek']
-            accuracy_scores = [gpt_accuracy, deepseek_accuracy]
-
-            bars1 = ax1.bar(models, accuracy_scores, color=['skyblue', 'lightcoral'], width=0.4, label='Accuracy (%)')
-            ax1.set_ylabel('Accuracy (%)', color='black')
-            ax1.tick_params(axis='y', labelcolor='black')
-            ax1.set_ylim(0, 100)
-
-            for bar in bars1:
-                yval = bar.get_height()
-                ax1.text(bar.get_x() + bar.get_width()/2, yval + 2, f'{yval:.2f}%', ha='center', va='bottom')
-
-            if show_consistency:
-                ax2 = ax1.twinx()
-                consistency_scores = [gpt_consistency, deepseek_consistency]
-                lines = ax2.plot(models, consistency_scores, color='green', marker='o', linestyle='-', linewidth=2, label='Consistency (1-5)')
-                ax2.set_ylabel('Consistency Score (1-5)', color='green')
-                ax2.tick_params(axis='y', labelcolor='green')
-                ax2.set_ylim(0, 5)
-
-                for i, score in enumerate(consistency_scores):
-                     ax2.text(i, score + 0.1, f'{score:.2f}', ha='left', va='bottom', color='green')
-
-                lines1, labels1 = ax1.get_legend_handles_labels()
-                lines2, labels2 = ax2.get_legend_handles_labels()
-                ax1.legend(lines1 + lines2, labels1 + labels2, loc='upper left')
-            else:
-                 ax1.legend(loc='upper left')
-
-            plt.title('Overall API Performance')
-            plt.tight_layout()
-
-            self.graph_canvas = FigureCanvasTkAgg(self.fig, master=self.graph_frame)
-            self.graph_canvas.draw()
-            self.graph_canvas_widget = self.graph_canvas.get_tk_widget()
-            self.graph_canvas_widget.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
-
-        self.master.after(0, create_graph)
-
-    def hide_graph(self):
+    def show_results_graph_in_gui(self, gpt_accuracy, deepseek_accuracy, gpt_consistency, deepseek_consistency, show_consistency):
+        """Creates and displays the performance graph in the GUI."""
         if self.graph_canvas_widget:
             self.graph_canvas_widget.destroy()
             self.graph_canvas_widget = None
+            plt.close(self.fig)
+            self.fig = None
+
+        self.fig, ax1 = plt.subplots(figsize=(8, 4))
+
+        models = ['GPT', 'Deepseek']
+        accuracy_scores = [gpt_accuracy, deepseek_accuracy]
+
+        bars1 = ax1.bar(models, accuracy_scores, color=['skyblue', 'lightcoral'], width=0.4, label='Accuracy (%)')
+        ax1.set_ylabel('Accuracy (%)', color='black')
+        ax1.tick_params(axis='y', labelcolor='black')
+        ax1.set_ylim(0, 100)
+
+        for bar in bars1:
+            yval = bar.get_height()
+            ax1.text(bar.get_x() + bar.get_width()/2, yval + 2, f'{yval:.2f}%', ha='center', va='bottom')
+
+        if show_consistency:
+            ax2 = ax1.twinx()
+            consistency_scores = [gpt_consistency, deepseek_consistency]
+            lines = ax2.plot(models, consistency_scores, color='green', marker='o', linestyle='-', linewidth=2, label='Consistency (1-5)')
+            ax2.set_ylabel('Consistency Score (1-5)', color='green')
+            ax2.tick_params(axis='y', labelcolor='green')
+            ax2.set_ylim(0, 5)
+
+            for i, score in enumerate(consistency_scores):
+                 ax2.text(i, score + 0.1, f'{score:.2f}', ha='left', va='bottom', color='green')
+
+            lines1, labels1 = ax1.get_legend_handles_labels()
+            lines2, labels2 = ax2.get_legend_handles_labels()
+            ax1.legend(lines1 + lines2, labels1 + labels2, loc='upper left')
+        else:
+             ax1.legend(loc='upper left')
+
+        plt.title('Overall ChatBot Performance')
+        plt.tight_layout()
+
+        # Embed the matplotlib figure in the Tkinter GUI
+        self.graph_canvas = FigureCanvasTkAgg(self.fig, master=self.graph_display_frame)
+        self.graph_canvas.draw()
+        self.graph_canvas_widget = self.graph_canvas.get_tk_widget()
+        self.graph_canvas_widget.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+
+    # Removed the old show_results_graph function
+
+    def hide_graph(self):
+        """Hides the graph from the GUI."""
+        if self.graph_canvas_widget:
+            self.graph_canvas_widget.destroy()
+            self.graph_canvas_widget = None
+            if self.fig: # Close the matplotlib figure to free up memory
+                plt.close(self.fig)
+                self.fig = None
+
 
     def clear_results_display(self):
         self.update_test_case_display("", "")
         self.clear_individual_results_display()
+        self.hide_graph() # Also hide the graph when clearing results
+
 
     def testing_complete(self):
         self.is_running = False
@@ -713,6 +873,7 @@ class APITesterGUI:
             messagebox.showwarning("Warning", "Overall results not available for HTML report.")
             return
 
+        # Generate the graph image for the HTML report
         fig, ax1 = plt.subplots(figsize=(8, 4))
 
         models = ['GPT', 'Deepseek']
@@ -755,10 +916,11 @@ class APITesterGUI:
 
         buf = io.BytesIO()
         fig.savefig(buf, format='png')
-        plt.close(fig)
+        plt.close(fig) # Close the figure after saving to buffer
         data = base64.b64encode(buf.getbuffer()).decode("ascii")
         img_html = f'<img src="data:image/png;base64,{data}" alt="Overall Performance Graph" style="max-width: 100%; height: auto;">'
 
+        # HTML content with table for overall stats and keyword section
         html_content = f"""
         <!DOCTYPE html>
         <html lang="en">
@@ -773,8 +935,9 @@ class APITesterGUI:
                 h2 {{ color: #007bff; margin-top: 20px; margin-bottom: 10px; }}
                 h3 {{ color: #17a2b8; margin-top: 15px; margin-bottom: 8px; }}
                 .stats-box {{ background-color: #e9ecef; padding: 20px; margin-bottom: 20px; border-radius: 8px; border: 1px solid #ced4da; }}
-                .stats-box p {{ margin: 10px 0; font-size: 1.1em; }}
-                .stats-box strong {{ color: #555; }}
+                .stats-table {{ width: 100%; border-collapse: collapse; margin-top: 15px; }}
+                .stats-table th, .stats-table td {{ border: 1px solid #ced4da; padding: 10px; text-align: left; }}
+                .stats-table th {{ background-color: #d0d9e2; font-weight: bold; }}
                 .graph-container {{ text-align: center; margin-bottom: 30px; padding: 20px; background-color: #e9ecef; border-radius: 8px; border: 1px solid #ced4da; }}
                 .test-case {{ border: 1px solid #dee2e6; padding: 20px; margin-bottom: 25px; border-radius: 8px; background-color: #f8f9fa; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }}
                 .test-case h3 {{ border-bottom: 1px solid #17a2b8; padding-bottom: 5px; }}
@@ -784,6 +947,9 @@ class APITesterGUI:
                 .evaluation.pass {{ color: #28a745; border-left-color: #28a745; }}
                 .evaluation.consistency {{ color: #0000CC; border-left-color: #0000CC; }}
                 strong {{ color: #555; }}
+                .keywords-box {{ background-color: #e9ecef; padding: 20px; margin-top: 20px; border-radius: 8px; border: 1px solid #ced4da; }}
+                .keywords-list {{ list-style: none; padding: 0; }}
+                .keywords-list li {{ background-color: #d0d9e2; margin: 5px 0; padding: 8px; border-radius: 4px; display: inline-block; margin-right: 10px; }}
             </style>
         </head>
         <body>
@@ -792,28 +958,76 @@ class APITesterGUI:
 
                 <div class="stats-box">
                     <h2>Overall Results</h2>
-                    <p><strong>Total Test Cases Loaded:</strong> {self.overall_stats.get('total_cases_loaded', 'N/A')}</p>
-                    <p><strong>Total Test Cases Run:</strong> {self.overall_stats.get('total_cases_run', 'N/A')}</p>
-                    <p><strong>Number of Retries per Case:</strong> {self.overall_stats.get('num_retries', 'N/A')}</p>
-                    <p><strong>Total Possible Evaluations:</strong> {self.overall_stats.get('total_possible_evaluations', 'N/A')}</p>
-                    <p><strong>GPT Accuracy:</strong> {self.overall_stats.get('gpt_valid_count_overall', 'N/A')}/{self.overall_stats.get('total_possible_evaluations', 'N/A')} ({self.overall_stats.get('gpt_valid_percent_overall', 0):.2f}% Valid)</p>
-                    <p><strong>Deepseek Accuracy:</strong> {self.overall_stats.get('deepseek_valid_count_overall', 'N/A')}/{self.overall_stats.get('total_possible_evaluations', 'N/A')} ({self.overall_stats.get('deepseek_valid_percent_overall', 0):.2f}% Valid)</p>
-        """
-
+                    <table class="stats-table">
+                        <tr>
+                            <th>Metric</th>
+                            <th>Value</th>
+                        </tr>
+                        <tr>
+                            <td>Total Test Cases Loaded</td>
+                            <td>{self.overall_stats.get('total_cases_loaded', 'N/A')}</td>
+                        </tr>
+                        <tr>
+                            <td>Total Test Cases Run</td>
+                            <td>{self.overall_stats.get('total_cases_run', 'N/A')}</td>
+                        </tr>
+                        <tr>
+                            <td>Test Coverage</td>
+                            <td>{self.overall_stats.get('overall_coverage', 0):.2f}%</td>
+                        </tr>
+                        <tr>
+                            <td>Average Test Complexity (Run Cases)</td>
+                            <td>{self.overall_stats.get('overall_avg_complexity', 0):.2f}</td>
+                        </tr>
+                        <tr>
+                            <td>Number of Retries per Case</td>
+                            <td>{self.overall_stats.get('num_retries', 'N/A')}</td>
+                        </tr>
+                        <tr>
+                            <td>Total Possible Evaluations</td>
+                            <td>{self.overall_stats.get('total_possible_evaluations', 'N/A')}</td>
+                        </tr>
+                        <tr>
+                            <td>GPT Accuracy</td>
+                            <td>{self.overall_stats.get('gpt_valid_count_overall', 'N/A')}/{self.overall_stats.get('total_possible_evaluations', 'N/A')} ({self.overall_stats.get('gpt_valid_percent_overall', 0):.2f}% Valid)</td>
+                        </tr>
+                        <tr>
+                            <td>Deepseek Accuracy</td>
+                            <td>{self.overall_stats.get('deepseek_valid_count_overall', 'N/A')}/{self.overall_stats.get('total_possible_evaluations', 'N/A')} ({self.overall_stats.get('deepseek_valid_percent_overall', 0):.2f}% Valid)</td>
+                        </tr>
+                        """
         if self.overall_stats.get('show_consistency', False):
              html_content += f"""
-                    <p><strong>GPT Consistency (Avg Score 1-5):</strong> {self.overall_stats.get('avg_gpt_consistency', 0):.2f}</p>
-                    <p><strong>Deepseek Consistency (Avg Score 1-5):</strong> {self.overall_stats.get('avg_deepseek_consistency', 0):.2f}</p>
+                        <tr>
+                            <td>GPT Consistency (Avg Score 1-5)</td>
+                            <td>{self.overall_stats.get('avg_gpt_consistency', 0):.2f}</td>
+                        </tr>
+                        <tr>
+                            <td>Deepseek Consistency (Avg Score 1-5)</td>
+                            <td>{self.overall_stats.get('avg_deepseek_consistency', 0):.2f}</td>
+                        </tr>
              """
-        else:
-             html_content += "<p>Consistency evaluation skipped (retries = 1).</p>"
-
         html_content += f"""
+                    </table>
                 </div>
 
                 <div class="graph-container">
                     <h2>Performance Graph</h2>
                     {img_html}
+                </div>
+
+                <div class="keywords-box">
+                    <h2>Common Keywords (from Run Prompts)</h2>
+                    <ul class="keywords-list">
+        """
+        if self.overall_stats.get('common_keywords'):
+            for keyword, count in self.overall_stats['common_keywords']:
+                html_content += f"<li>{keyword} ({count})</li>"
+        else:
+            html_content += "<li>No keywords found.</li>"
+
+        html_content += """
+                    </ul>
                 </div>
 
                 <h2>Detailed Test Case Results</h2>
@@ -824,6 +1038,7 @@ class APITesterGUI:
                 html_content += f"""
                 <div class="test-case">
                     <h3>Test Case (Original Index: {case.get('original_index', 'N/A')})</h3>
+                    <p><strong>Complexity:</strong> {case.get('complexity', 'N/A'):.2f}</p>
                     <p><strong>Prompt:</strong></p>
                     <pre>{case.get('prompt', 'N/A')}</pre>
                     <p><strong>Expected Output:</strong></p>
@@ -872,13 +1087,20 @@ class APITesterGUI:
 
 
     def hide_graph(self):
+        """Hides the graph from the GUI."""
         if self.graph_canvas_widget:
             self.graph_canvas_widget.destroy()
             self.graph_canvas_widget = None
+            if self.fig: # Close the matplotlib figure to free up memory
+                plt.close(self.fig)
+                self.fig = None
+
 
     def clear_results_display(self):
         self.update_test_case_display("", "")
         self.clear_individual_results_display()
+        self.hide_graph() # Also hide the graph when clearing results
+
 
     def testing_complete(self):
         self.is_running = False
@@ -888,3 +1110,4 @@ if __name__ == "__main__":
     root = tk.Tk()
     app = APITesterGUI(root)
     root.mainloop()
+
